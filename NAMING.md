@@ -203,7 +203,8 @@ fourth finalist.
 1. Confirm the *(from memory)* findings for any name you still want to keep.
 2. Search for "⟨name⟩ language" and "⟨name⟩ lisp" one more time, in case
    something new has appeared.
-3. On the Pi, check that nothing else is installed under the command name:
+3. On a typical Linux system, check that nothing else is installed under the
+   command name:
    `command -v ⟨name⟩` and `apt-cache policy ⟨name⟩`.
 4. Type `⟨name⟩ build compiler.⟨ext⟩` a few times, and keep whichever you
    don't mind typing on a bad day.

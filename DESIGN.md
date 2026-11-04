@@ -17,16 +17,32 @@ No optimization passes, no intermediate representation, no cleverness.
 
 ## Target and host
 
-ARM64 on a Raspberry Pi 5 (8 GB, 64-bit Raspberry Pi OS). Plain ARMv8-A,
-ignoring optional extensions. Output is a static ELF written directly by the
-compiler — no object files, no relocations, no `PT_INTERP`, no libc. Everything
-the runtime needs comes from raw syscalls.
+The target is Linux on a generic 64-bit ARM machine: plain ARMv8-A, ignoring
+optional extensions. Output is a static ELF written directly by the compiler —
+no object files, no relocations, no `PT_INTERP`, no libc. Everything the
+runtime needs comes from raw syscalls. The arm64 Linux syscall ABI is the same
+on every machine, so nothing in the output is specific to a board.
+
+**The reference platform is QEMU's `virt` machine**
+(`qemu-system-aarch64 -M virt`) running a stock arm64 Linux kernel. It uses a
+CPU model with no extensions beyond ARMv8.0-A, such as `-cpu cortex-a57`. Not
+`-cpu max`, which enables every extension QEMU knows, so code that used one
+by accident would still pass. Whatever runs there should run on any arm64
+Linux machine: boards, cloud instances, CI runners.
+
+**The host can be anything.** The interpreter is portable, so stage 1 can be
+produced on any machine. Running lc1 and the later stages needs arm64 Linux,
+native or emulated. `qemu-aarch64` user-mode emulation runs the static
+binaries directly on a non-ARM host and is a cheap way to run the chain, but
+it is not the reference: it uses the host's page size and implements the
+syscalls itself.
 
 ### Page size
 
-The Pi 5 boots `kernel_2712.img` by default, which uses **16 KB pages**. Common
-CI arm64 runners use 4 KB pages, so a layout that only works for 4 KB passes CI
-and fails on the Pi.
+arm64 Linux kernels are built with 4 KB, 16 KB or 64 KB pages, and
+distributions differ in which they ship. A layout that only works for 4 KB
+passes on most machines and fails on the rest, so the output must work with
+all three:
 
 - The ELF has a single RWX `PT_LOAD` segment starting at file offset 0. Its
   `p_vaddr ≡ p_offset (mod page size)` holds trivially for any page size.
@@ -188,7 +204,8 @@ iteration orders that differ between the Go runtime and this runtime. In
 particular, the compiler never iterates a Go map or the symbol table to decide
 emission order. Order always comes from source order or an explicit list.
 
-The full chain, including stage 1 and the differential corpus, runs in CI.
+The full chain, including stage 1 and the differential corpus, runs in CI on
+the reference platform, with both a 4 KB and a 64 KB page kernel.
 
 ## Object model
 
@@ -254,8 +271,8 @@ Nothing else matters until lc1 == lc2.
 
 1. Go interpreter running Lisp-0, with a REPL.
 2. Assembler and ELF writer in Lisp-0. Validated by hand-emitting a trivial
-   print-and-exit program, and running it on a 16 KB page kernel as well as a
-   4 KB one.
+   print-and-exit program, and running it under QEMU's `virt` machine on
+   kernels with 4 KB and 64 KB pages.
 3. Front end: reader and closure conversion. A straight recursive walk.
 4. Code generator and runtime prelude. Produce lc1.
 5. Grind until the invariant holds. This is expected to be most of the project.
