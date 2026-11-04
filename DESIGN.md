@@ -9,8 +9,9 @@ Two properties, deliberately both:
 
 - **Self-hosting** — the compiler compiles its own source.
 - **Toolchain-independent** — no C compiler, no assembler, no linker in the
-  build. The only external dependency is a Go toolchain used once to start the
-  chain, plus the kernel.
+  build: each stage compiles the next with nothing else. The only external
+  dependency is a C compiler used once, to build the interpreter that starts
+  the chain, plus the kernel.
 
 Everything is as simple and dumb as possible until the fixed point is reached.
 No optimization passes, no intermediate representation, no cleverness.
@@ -30,7 +31,7 @@ CPU model with no extensions beyond ARMv8.0-A, such as `-cpu cortex-a57`. Not
 by accident would still pass. Whatever runs there should run on any arm64
 Linux machine: boards, cloud instances, CI runners.
 
-**The host can be anything.** The interpreter is portable, so stage 1 can be
+**The host can be anything.** The interpreter is portable C, so stage 1 can be
 produced on any machine. Running lc1 and the later stages needs arm64 Linux,
 native or emulated. `qemu-aarch64` user-mode emulation runs the static
 binaries directly on a non-ARM host and is a cheap way to run the chain, but
@@ -57,7 +58,7 @@ all three:
   never grows.
 - The language the compiler **accepts** grows freely.
 
-Freezing the first axis keeps the Go interpreter able to run the compiler
+Freezing the first axis keeps the C interpreter able to run the compiler
 source indefinitely, which preserves the ability to rebuild the whole toolchain
 from source forever.
 
@@ -114,33 +115,36 @@ recursion, and proper tail calls are part of the language.
 - The interpreter's `eval` loops on tail positions instead of recursing.
 - The code generator tears down the frame and branches with `b`, not `bl`.
 
-Without this, the interpreter (Go stacks grow to 1 GB) would build lc1, and
-lc1 (8 MB default stack) would crash on its own source.
+Without this, neither the interpreter nor lc1 could loop over a source file of
+any size: every iteration would use a stack frame, and both run on an 8 MB
+default stack.
 
 **Identity.** `eq?` is pointer identity for heap objects and value equality for
-fixnums, symbols, booleans and `'()`. In the interpreter every heap type is a
-Go pointer (`*Pair`, `*String`, `*Vector`, `*Bytevector`, …). A Go `string`
-inside an interface would compare by contents, and a `[]byte` would make `==`
-panic.
+fixnums, symbols, booleans and `'()`. The interpreter uses the runtime's tagged
+words as its values, so on both sides `eq?` is a comparison of two words.
 
 **Quoted constants are immutable.** Mutating a quoted constant is an error.
-Compiled constants live in the image, and interpreter constants are ordinary
-Go values, so the two could not behave the same.
+Compiled constants live in the image and interpreter constants on its heap, so
+mutating one could not behave the same on both sides.
 
 **Fixnum arithmetic.**
 
-- Fixnums are 61-bit signed integers.
+- Fixnums are 61-bit signed integers, stored as tagged 64-bit words with tag
+  zero (the value times 8).
 - Overflow is undefined, and the compiler source never relies on wraparound.
-  The interpreter still truncates every result to 61 bits (sign-extend from bit
-  60), so an accidental overflow shows up the same way on both sides instead
-  of being hidden by Go's 64-bit `int64`.
+  Both sides add, subtract and multiply tagged words modulo 2⁶⁴, so an
+  accidental overflow wraps at 61 bits in the same way on both sides.
+- In the interpreter all of this is done on `uint64_t`. C leaves signed
+  overflow, left-shifting a negative value and `INT64_MIN / -1` undefined, and
+  right-shifting a negative value implementation-defined. The interpreter
+  converts to `int64_t` only to compare and divide, implements arithmetic right
+  shift explicitly, and never relies on compiler flags such as `-fwrapv`.
 - Division and remainder truncate toward zero, which matches both ARM64 `sdiv`
-  and Go `/` and `%`. **Dividing by zero is an error, checked explicitly on both
-  sides**: `sdiv` returns 0 without trapping, while Go panics.
+  and C99 `/` and `%`. **Dividing by zero is an error, checked explicitly on both
+  sides**: `sdiv` returns 0 without trapping, and in C it is undefined.
 - Shift counts must be in 0–63, checked on both sides. `lslv` and `asrv` use
-  the count modulo 64, while Go gives 0 or −1 for counts of 64 or more and
-  panics on negative counts. Within 0–63, tagged shifts on the machine and
-  truncated shifts in Go agree.
+  the count modulo 64, and in C a shift by 64 or more is undefined. Within
+  0–63, the machine and the interpreter agree.
 - Both readers truncate or reject integer literals outside the 61-bit range in
   the same way.
 
@@ -153,20 +157,48 @@ Go values, so the two could not behave the same.
 - writing to stdout and stderr;
 - exiting with a status code.
 
-## The Go interpreter
+## The C interpreter
 
-Around 800–1200 lines. Values are an interface with a type switch, environments
-are parent-linked maps, and it has its own reader. It runs once to produce
-stage 1 and is then kept forever, but never required.
+Strict C99, using only the standard library (`stdio.h`, `stdlib.h`,
+`string.h`, `stdint.h`, `setjmp.h`). No compiler extensions and no reliance on
+compiler flags, so any C99 compiler builds it, including small ones such as
+tcc. Estimated at 1,500–2,500 lines, with its own reader. It runs once to
+produce stage 1 and is then kept forever, but never required.
 
 It is a **semantic specification**, not a throwaway: any divergence from the
 compiled runtime becomes a compiler that works under the interpreter and
 miscompiles itself. Every rule in [Semantic rules](#semantic-rules) applies to
 it.
 
-The interpreter also counts the bytes the program allocates, measured in the
-compiled object layout. Nothing is freed before generation one, so this shows
-how much headroom the self-compile has.
+**Same object model as the runtime.** Values are `uint64_t` tagged words with
+the runtime's tags, header words and object layouts (see
+[Object model](#object-model)), allocated from a bump heap. This removes whole
+classes of divergence: `eq?` is a word comparison, fixnums wrap at 61 bits
+because they are tagged words, and the interpreter doubles as the reference for
+the heap layout that the compiled runtime can be checked against.
+
+**Structure.**
+
+- Global variables live in a value slot on each symbol.
+- Local environments are heap frames linked to their parent.
+- `eval` loops on tail positions (see
+  [Proper tail calls](#semantic-rules)).
+- The symbol table hashes symbol names by their contents, never by address.
+- Errors print a message and `longjmp` back to the REPL, or exit with a
+  non-zero status when running a file.
+
+**Memory.** The heap is bump-allocated and nothing is freed, as in the
+runtime. An interpreter allocates far more than compiled code for the same
+work, though: it builds an environment frame on every call, where compiled code
+mostly keeps arguments on the stack. So the self-compile may not fit. The
+interpreter counts the bytes it allocates from the first day. If the
+self-compile doesn't fit, the interpreter gets a mark-sweep collector over the
+same heap, which doubles as a dry run of generation one.
+
+**Stack.** The interpreter runs on the default C stack, typically 8 MB, the
+same limit as compiled code. Deep non-tail recursion in the compiler source
+therefore fails under the interpreter at least as early as under lc1, which is
+the useful direction.
 
 ## Bootstrap chain and verification
 
@@ -200,9 +232,11 @@ diverging program points at the faulty operation. Then the first differing
 function in the lc1 and lc2 diff points at where it is used.
 
 Emitted binaries must be **deterministic**: no timestamps, paths, addresses, or
-iteration orders that differ between the Go runtime and this runtime. In
-particular, the compiler never iterates a Go map or the symbol table to decide
-emission order. Order always comes from source order or an explicit list.
+iteration orders that differ between the interpreter and the compiled runtime.
+The interpreter's heap addresses differ from the runtime's, so the compiler
+never hashes or orders anything by address, and never iterates the symbol table
+to decide emission order. Order always comes from source order or an explicit
+list.
 
 The full chain, including stage 1 and the differential corpus, runs in CI on
 the reference platform, with both a 4 KB and a 64 KB page kernel.
@@ -269,7 +303,7 @@ callee-saved registers before scanning. Both are runtime-only.
 
 Nothing else matters until lc1 == lc2.
 
-1. Go interpreter running Lisp-0, with a REPL.
+1. C interpreter running Lisp-0, with a REPL.
 2. Assembler and ELF writer in Lisp-0. Validated by hand-emitting a trivial
    print-and-exit program, and running it under QEMU's `virt` machine on
    kernels with 4 KB and 64 KB pages.
@@ -324,6 +358,12 @@ pins whatever the stack might reference and moves the rest.
 
 - **Emitting C** — self-hosting but not toolchain-independent, and it
   constrains tail calls.
+- **A Go interpreter** — the original plan. Values as an interface with a type
+  switch and environments as maps are quick to write. But they give the
+  interpreter a second object model that has to be kept in step with the
+  runtime: Go's `==` compares strings by contents, map iteration order is
+  randomized, and integers are 64-bit. Rebuilding a modern Go from source also
+  means building a long series of older Go releases, starting from Go 1.4.
 - **Fexprs / quote-only, no special forms** — needs eval plus first-class
   environments, gives dynamic scoping by default, and the compiler must still
   recognize `if` syntactically to emit a branch. Wand's result makes
