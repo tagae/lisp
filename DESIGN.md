@@ -5,8 +5,6 @@ executables directly.
 
 ## Goal
 
-Two properties, deliberately both:
-
 - **Self-hosting** — the compiler compiles its own source.
 - **Toolchain-independent** — no C compiler, no assembler, no linker in the
   build: each stage compiles the next with nothing else. The only external
@@ -375,3 +373,21 @@ pins whatever the stack might reference and moves the rest.
   per argument, and unsequenced effects are fatal for a code generator that
   appends bytes in order. Laziness belongs in the target language as
   `delay`/`force`.
+
+## Planned as next steps
+
+- The language is cast to belong to the Lisp family, drawing inspiration from Common Lisp and
+  Scheme, but it is not meant to be compatible, and can depart from those. Much in the way Clojure
+  was designed.
+
+- Have a richer syntax, along the lines of Clojure, by making it possible to
+  use not only parentheses, but also curly braces, brackets, and probably other
+  syntactic sugar, while staying within the realm of a Lisp family language.
+
+- Language design should be geared towards functional programming, meaning
+  that we prefer immutability, composition, and avoid side effects.
+
+- We will aim at having persistent data structures, in the Clojure sense, rather than having
+  anything to do with databases).
+
+- We will aim at having datoms and datomic databases, like Clojure.
