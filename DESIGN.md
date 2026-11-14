@@ -26,8 +26,16 @@ one-command build from source.
 - **Self-hosting** — the compiler compiles its own source.
 - **Toolchain-independent** — no C compiler, no assembler, no linker in the
   build: each stage compiles the next with nothing else. The only external
-  dependency is a C compiler used once, to build the interpreter that starts
-  the chain, plus the kernel.
+  dependency is a C compiler, to build the interpreter that starts the chain,
+  plus the kernel.
+- **A minimal C interpreter** — the interpreter is the only part of the
+  project that is not written in the language itself, so it is kept as small
+  as possible. Whatever can be written in Lisp-0 is, and Lisp-0 has nothing
+  the compiler can do without (see [The C interpreter](#the-c-interpreter)).
+
+**The bootstrap comes first.** When a language feature conflicts with the
+bootstrap, the feature gives way: it is simplified, moved to the second
+compiler, or dropped.
 
 Everything is as simple and dumb as possible until the fixed point is reached.
 No optimization passes, no intermediate representation, no cleverness.
@@ -97,11 +105,13 @@ all three:
 
 - The language the compiler is **written in** is frozen. Call it Lisp-0. It
   never grows.
-- The language the compiler **accepts** grows freely.
+- The language the compiler **accepts** grows, up to a fixed limit (see
+  [Two compilers](#two-compilers)).
 
 Freezing the first axis keeps the C interpreter able to run the compiler
 source indefinitely, which preserves the ability to rebuild the whole toolchain
-from source forever.
+from source forever. **Every build goes through the interpreter**: no compiled
+compiler is ever committed or downloaded.
 
 **Frozen means frozen semantics, not just frozen syntax.** The compiled
 compiler is compiled under the accepted language's semantics, not under
@@ -109,81 +119,132 @@ Lisp-0's. The accepted language must therefore be a strict superset of Lisp-0
 that gives every Lisp-0 program exactly the same meaning. Growth may add
 constructs and give meaning to programs Lisp-0 leaves undefined. It must never
 change the meaning of a defined Lisp-0 program. This is why Lisp-0 leaves
-fixnum overflow undefined (see below): a later switch to bignum promotion
-must not change the meaning of the compiler's own code.
+fixnum overflow undefined and rejects integer literals that do not fit a
+fixnum (see below): a later switch to bignum promotion must not change the
+meaning of the compiler's own code.
 
-**Two compilers.** The compiler written in Lisp-0 is the bootstrap compiler.
-It stays simple and frozen, and the byte-for-byte invariant applies to it
-alone. The optimizing compiler planned for later is a second program, written
-in the full language and compiled by the bootstrap compiler.
+**Lisp-0 is defined in full before any code is written, and frozen at the
+fixed point.** Between the two it can be amended, each change with its reason
+recorded here.
+
+### Two compilers
+
+The compiler written in Lisp-0 is the **bootstrap compiler**. The
+byte-for-byte invariant applies to it alone.
+
+It accepts a **middle language**, defined once: Lisp-0 plus macros, local
+mutation, rest parameters and whatever data types the second compiler needs.
+Once it accepts the middle language, the bootstrap compiler stops growing.
+This bounds the time and memory of stage 1 by design: stage 1 runs the whole
+bootstrap compiler under a plain tree-walking interpreter, and the interpreter
+is not made faster to keep up.
+
+The **second compiler** is written in the middle language and compiled by the
+bootstrap compiler. It implements the full language: the richer syntax,
+conditions, typing, optimization and parallelism. It reaches its own fixed
+point in the ordinary way (it compiles itself twice and the two outputs are
+identical).
 
 ## Lisp-0
 
 Lisp-0 is a subset of the functional language, not a Scheme that the language
 later moves away from. Its rules on data, truthiness and syntax are therefore
-those of the full language, and are fixed before any code is written.
+those of the full language.
 
-Deliberately minimal:
+It contains only what the compiler cannot reasonably do without, because
+every form and primitive is implemented twice: in C in the interpreter, and in
+the code generator.
 
-- Special forms: `quote`, `if`, `lambda`, `define`, `set!`, `begin`, plus
-  `cond`, `let`, `and`, `or` and `quasiquote`, all hardcoded.
-- Data: pairs, interned symbols, fixnums, strings, vectors, bytevectors, the
-  empty list, `nil`, and the booleans.
-- Enough file I/O to read source and write a binary.
+**Special forms**, all hardcoded: `quote`, `if`, `fn`, `def`, `set!`, `do`,
+`let`, `cond`, `and`, `or`. The bodies of `fn` and `let` and the clauses of
+`cond` are implicit `do`s.
 
-The names of the special forms and primitives are still open: the language
-uses its own names, and they are chosen before Lisp-0 is frozen.
+**Data**: pairs, interned symbols, fixnums, strings, bytevectors, functions
+and `nil`.
 
-No macros in Lisp-0. This is deliberate: hardcoding roughly ten special forms
-in both implementations costs less than a macro expander, and it means the
-compiled compiler never has to run a transformer at compile time, so
-compile-time eval drops off the critical path entirely. Macros and eval come
-later, for users of the language, not for the bootstrap.
+**Left out**, and why:
+
+- *Macros.* Hardcoding ten special forms in both implementations costs less
+  than a macro expander, and the compiled compiler never has to run a
+  transformer at compile time, so compile-time eval drops off the critical
+  path.
+- *`quasiquote`.* It needs three more reader characters and a recursive
+  special form on both sides. The compiler builds lists with `pair`.
+- *Vectors.* Pairs and bytevectors are enough for the compiler. Vectors come
+  with the middle language.
+- *Booleans and a separate empty list.* See [Truthiness](#semantic-rules).
+- *A character type, and anything outside ASCII.*
+- *Rest parameters and `apply`.*
+- *Structural equality.*
+- *A loop construct.*
+
+**Names** follow one rule: Clojure's short form where it has a good one (`fn`,
+`def`, `do`, `let`), whole English words otherwise (`first` and `rest`, not
+`car` and `cdr`), `?` at the end of a predicate and `!` at the end of a
+mutator. The names in this document are those the rule gives. They are
+confirmed one by one in step 0 of [Milestones](#milestones).
 
 ### Semantic rules
 
 The interpreter and the compiled runtime must agree on all of these. Anything
 not defined here is an error, and the compiler source never does it.
 
-**Truthiness.** Only `nil` and `false` are falsy. Every other value is true,
-including the empty list and every other empty collection. `nil`, `false` and
-the empty list are three distinct values. Emptiness is tested explicitly.
-Making empty collections falsy was rejected: it merges "absent" with "empty",
-it turns every `if` from a word comparison into a type and count check, and it
-would force lazy sequences to be evaluated by `if`.
+**Truthiness.** `nil` is the only falsy value, and it is also the empty list:
+a list is `nil` or a pair. There are no booleans. Predicates return the symbol
+`t`, whose value is itself and cannot be changed. Every value other than `nil`
+is true, including the empty string, the empty bytevector and zero. `if` is
+therefore a comparison with one word.
 
-**Immutable data.** Pairs, strings and vectors are immutable: they are fully
-built when created, and there is no `set-car!`, `vector-set!` or
-`string-set!`. Mutation exists only in two explicit places:
+`first` and `rest` of `nil` are `nil`. Of anything else that is not a pair
+they are an error.
+
+**Immutable data.** Pairs, strings and symbols are immutable: there is no
+`set-first!` and no `string-set!`. A string of a length not known in advance
+is accumulated in a bytevector and converted once, by `bytes->string`.
+Mutation exists only in two explicit places:
 
 - bytevectors, which are mutable buffers (the assembler writes into one and
-  patches fixups in it);
+  patches fixups in it, and the compiler's tables are built on them);
 - global variables, through `set!`.
 
-**Reserved syntax.** Lisp-0 uses parentheses only. The characters `[`, `]`,
-`{` and `}`, and the characters set aside for later sugar and for type
-annotations, are not allowed in Lisp-0 symbols, and the Lisp-0 reader rejects
-them. The full language can then give them a meaning without changing any
-Lisp-0 program. The exact set is fixed before Lisp-0 is frozen.
+**Strings.** A string is an immutable sequence of bytes, each in 0–127.
+Indexing gives a fixnum. Lisp-0 source is ASCII: both readers reject any byte
+above 127, so the full language is free to decide what a character is.
+
+**Symbol alphabet and reserved syntax.** A Lisp-0 symbol contains only
+letters, digits and `- ? ! * + / < > = .`, and does not look like an integer.
+Besides these, the reader accepts `(`, `)`, `'`, `"` and `;`. Every other
+ASCII punctuation character is rejected outside strings and comments. That
+reserves `[ ] { } : # @ ^ ~ & % $ | \ _`, the backquote and the comma, so the
+later languages can give them a meaning without changing any Lisp-0 program.
+
+**Literals.** Integers are written in decimal or, with `0x`, in hexadecimal.
+A literal that does not fit a fixnum is an error. In a string, `\n`, `\\` and
+`\"` are the only escapes.
 
 **Definitions and assignment.**
 
-- `define` appears only at top level. There is no internal `define`.
-- `set!` applies only to global variables. Local variables (lambda parameters
+- `def` appears only at top level. There is no internal `def`.
+- `set!` applies only to global variables. Local variables (`fn` parameters
   and `let` bindings) are immutable.
+- The bindings of a `let` do not see each other.
 
 This keeps closure conversion a flat copy of captured values, with no
 assignment conversion and no letrec. Local recursive helpers are written as
-top-level definitions. The accepted language can lift this restriction later
-by adding assignment conversion (boxing variables that are both captured and
-assigned), which does not affect the bootstrap.
+top-level definitions. The middle language lifts this restriction by adding
+assignment conversion (boxing variables that are both captured and assigned),
+which does not affect the bootstrap.
+
+**Fixed arity.** A function has a fixed number of parameters, and calling it
+with another number is an error. This also holds for primitives: `+` takes
+two operands.
 
 **Proper tail calls.** Lisp-0 has no loop construct, so every loop is
 recursion, and proper tail calls are part of the language.
 
-- Tail positions are: the body of a `lambda`; both branches of `if`; the last
-  expression of `begin`, of a `cond` clause and of a `let` body; the last
-  operand of `and` and `or`.
+- Tail positions are: the last expression of a `fn` body, of `do`, of a
+  `cond` clause and of a `let` body; both branches of `if`; the last operand
+  of `and` and `or`.
 - The interpreter's `eval` loops on tail positions instead of recursing.
 - The code generator tears down the frame and branches with `b`, not `bl`.
 
@@ -191,15 +252,15 @@ Without this, neither the interpreter nor lc1 could loop over a source file of
 any size: every iteration would use a stack frame, and both run on an 8 MB
 default stack.
 
-**Identity.** `eq?` is pointer identity for heap objects and value equality for
-fixnums, symbols, booleans, `nil` and `'()`. The interpreter uses the runtime's tagged
-words as its values, so on both sides `eq?` is a comparison of two words.
+**Identity is the only equality.** `identical?` compares two words: pointer
+identity for heap objects, value equality for fixnums, symbols and `nil`. The
+interpreter uses the runtime's tagged words as its values, so both sides do
+the same comparison. Comparing strings by content is a Lisp-0 function in the
+prelude.
 
-**Quoted constants are immutable.** This follows from immutable data for
-pairs, strings and vectors. It also covers bytevectors: mutating a quoted
-bytevector is an error. Compiled constants live in the image and interpreter
-constants on its heap, so mutating one could not behave the same on both
-sides.
+**Quoted constants are immutable.** A literal can only be a pair, a symbol, a
+fixnum, a string or `nil`, all of which are immutable. There is no bytevector
+literal.
 
 **Fixnum arithmetic.**
 
@@ -214,30 +275,109 @@ sides.
   converts to `int64_t` only to compare and divide, implements arithmetic right
   shift explicitly, and never relies on compiler flags such as `-fwrapv`.
 - Division and remainder truncate toward zero, which matches both ARM64 `sdiv`
-  and C99 `/` and `%`. **Dividing by zero is an error, checked explicitly on both
-  sides**: `sdiv` returns 0 without trapping, and in C it is undefined.
-- Shift counts must be in 0–63, checked on both sides. `lslv` and `asrv` use
-  the count modulo 64, and in C a shift by 64 or more is undefined. Within
-  0–63, the machine and the interpreter agree.
-- Both readers truncate or reject integer literals outside the 61-bit range in
-  the same way.
+  and C99 `/` and `%`. Dividing by zero is an error: `sdiv` returns 0 without
+  trapping, and in C it is undefined.
+- Shift counts must be in 0–63. `lslv` and `asrv` use the count modulo 64, and
+  in C a shift by 64 or more is undefined.
 
-**I/O.** The primitives cover at least:
+**Errors.** Both sides check the type of every operand, every index, every
+argument count, division by zero and shift counts. Lisp-0 has a fixed table of
+errors, each with one message and one exit status. On an error, both sides
+write exactly that message to stderr and exit with that status: no values, no
+locations. A failing program therefore behaves identically on both sides, and
+the differential corpus compares failures as well as successes. Errors with
+more detail belong to the later languages.
 
-- reading a whole file into a bytevector;
-- creating a file with an explicit mode (0755 for the output binary) and
-  writing a bytevector to it;
-- access to the command-line arguments;
-- writing to stdout and stderr;
-- exiting with a status code.
+### Primitives
+
+About thirty, and each exists because it cannot be written in Lisp-0:
+
+| Group | Primitives |
+|---|---|
+| Pairs | `pair`, `first`, `rest`, `pair?` |
+| Types and identity | `identical?`, `symbol?`, `string?`, `bytes?`, `integer?` |
+| Arithmetic | `+`, `-`, `*`, `quotient`, `remainder`, `<` |
+| Bits | `bit-and`, `bit-or`, `shift-left`, `shift-right` |
+| Strings | `string-length`, `string-byte`, `bytes->string` |
+| Bytevectors | `bytes`, `bytes-length`, `bytes-get`, `bytes-set!` |
+| Symbols | `symbol`, `symbol-name` |
+| System | `read-file`, `write-file`, `write`, `arguments`, `exit` |
+
+The last two groups are the **duals** (see below). Everything else that the
+compiler uses (list functions, string comparison, number parsing and printing,
+hash tables, formatted output) is Lisp-0 code in the prelude.
+
+**Compile-only primitives.** Lisp-0 also defines `syscall` and raw memory
+access (read and write a word or a byte at an address, the address of an
+object, the stack pointer). The compiler emits them inline. They have no
+meaning under the interpreter, which does not know them: only the runtime uses
+them, and the interpreter never loads the runtime. Their set is frozen with
+the rest of Lisp-0, so it must be shown to be enough for a collector before
+the freeze (see [Milestones](#milestones)).
+
+## Source files and who runs them
+
+The compiler's source is in three parts.
+
+- **The prelude**: Lisp-0 library code. The interpreter loads it, and the
+  compiler compiles it into every image. One source for both sides, so it
+  cannot diverge.
+- **The compiler**: reader, closure conversion, code generator, assembler and
+  ELF writer. Loaded by the interpreter, compiled into lc1.
+- **The runtime**: Lisp-0 code that uses the compile-only primitives. The
+  interpreter never loads it. The compiler reads it as data and compiles it
+  into every image. It has two kinds of functions:
+  - *the duals' bodies*: the Lisp-0 implementation, over syscalls, of each
+    system and symbol primitive of the table above. The interpreter implements
+    the same primitives in C, with the standard library;
+  - *runtime-internal functions*, which no Lisp-0 program calls by name and
+    which have no counterpart in C: start-up, heap setup, the allocation slow
+    path, the error exits, and later the collector.
+
+**The duals are the one place where two implementations of the same function
+are written by hand**, so there are as few as possible and their contracts are
+as narrow as possible:
+
+- `read-file` returns a whole file as a bytevector. `write-file` creates a
+  file from a whole bytevector. `write` sends a bytevector to stdout or
+  stderr. `arguments` returns the command-line arguments as a list of strings.
+  `exit` ends the program with a status.
+- `symbol` returns the unique symbol with a given name, and `symbol-name` its
+  name. In compiled code the symbol table is a hash table over bytevectors,
+  hashed by the contents of the name and seeded at start-up from the symbols
+  in the image.
+- A dual succeeds completely or fails with an error from the table. It never
+  returns an error value, so a Lisp-0 program cannot observe a failure.
+- Their test is the self-compile: if the two sides differ, lc1 and lc2 differ.
+
+**One known difference.** In compiled code `write-file` creates the file with
+mode 0755. C99 has no way to set a mode, so the file the interpreter creates
+is not executable, and the build marks lc1 executable itself. No Lisp-0
+program can observe the difference.
 
 ## The C interpreter
 
-Strict C99, using only the standard library (`stdio.h`, `stdlib.h`,
-`string.h`, `stdint.h`, `setjmp.h`). No compiler extensions and no reliance on
-compiler flags, so any C99 compiler builds it. Estimated at 1,500–2,500
-lines, with its own reader. It runs once to produce stage 1 and is then kept
-forever, but never required.
+Strict C99, using only `stdio.h`, `stdlib.h`, `string.h` and `stdint.h`. No
+compiler extensions, no reliance on compiler flags, no POSIX, so any C99
+compiler builds it on any host. It is needed for every build, forever.
+
+**It is as small as it can be**: about 1,000–1,500 lines. What keeps it small:
+
+- **It only runs files.** `interpreter file... -- argument...` evaluates the
+  top-level forms of each file in order and exits. There is no REPL.
+- **Errors exit.** An error writes its message from the table and exits with
+  its status. There is no recovery, so no `setjmp`.
+- **No collector.** The heap is one block obtained from `malloc` and
+  bump-allocated, and nothing is freed. Running out is an error from the
+  table. If the self-compile does not fit, the compiler's source changes, not
+  the interpreter.
+- **No optimization.** A variable is looked up by walking the environment
+  frames each time. If stage 1 is too slow, the compiler's source changes.
+- **A reader for Lisp-0 only**: parentheses, `'`, symbols, integers, strings
+  and comments.
+- **Ten special forms and about thirty primitives**, of fixed arity.
+- **Nothing that Lisp-0 code can do.** No list library, no string comparison,
+  no number formatting: these are in the prelude.
 
 **Building with tcc is a requirement, checked in CI.** The interpreter is
 built with tcc and with gcc or clang, and the lc1 each build produces must be
@@ -251,10 +391,11 @@ it.
 
 **Same object model as the runtime.** Values are `uint64_t` tagged words with
 the runtime's tags, header words and object layouts (see
-[Object model](#object-model)), allocated from a bump heap. This removes whole
-classes of divergence: `eq?` is a word comparison, fixnums wrap at 61 bits
-because they are tagged words, and the interpreter doubles as the reference for
-the heap layout that the compiled runtime can be checked against.
+[Object model](#object-model)), allocated from the bump heap. This removes
+whole classes of divergence: `identical?` is a word comparison, fixnums wrap
+at 61 bits because they are tagged words, and the interpreter doubles as the
+reference for the heap layout that the compiled runtime can be checked
+against.
 
 **Structure.**
 
@@ -263,16 +404,6 @@ the heap layout that the compiled runtime can be checked against.
 - `eval` loops on tail positions (see
   [Proper tail calls](#semantic-rules)).
 - The symbol table hashes symbol names by their contents, never by address.
-- Errors print a message and `longjmp` back to the REPL, or exit with a
-  non-zero status when running a file.
-
-**Memory.** The heap is bump-allocated and nothing is freed, as in the
-runtime. An interpreter allocates far more than compiled code for the same
-work, though: it builds an environment frame on every call, where compiled code
-mostly keeps arguments on the stack. So the self-compile may not fit. The
-interpreter counts the bytes it allocates from the first day. If the
-self-compile doesn't fit, the interpreter gets a mark-sweep collector over the
-same heap, which doubles as a dry run of generation one.
 
 **Stack.** The interpreter runs on the default C stack, typically 8 MB, the
 same limit as compiled code. Deep non-tail recursion in the compiler source
@@ -282,10 +413,13 @@ the useful direction.
 ## Bootstrap chain and verification
 
 ```
-interpreter + compiler.lisp  →  lc1
-lc1        + compiler.lisp   →  lc2
-lc2        + compiler.lisp   →  lc3
+interpreter + prelude, compiler  →  lc1
+lc1         + compiler source    →  lc2
+lc2         + compiler source    →  lc3
 ```
+
+The interpreter loads the prelude and the compiler, and the compiler then
+compiles the prelude, the runtime and itself.
 
 **Strong invariant: lc1 == lc2, byte for byte.** This holds here (unusually)
 because lc1's bytes are produced by the compiler's own code generator running
@@ -300,22 +434,23 @@ hashing or ordering by pointer, or reading an uninitialized stack slot.
 
 **Comparing lc1, lc2 and lc3 does not show which side is at fault.** If
 lc1 != lc2, the interpreter and the compiled runtime disagree on some operation
-the compiler uses. lc2 == lc3 only says that the disagreement does not feed
-back on itself. The fault can be on either side. For example, a miscompiled
-`string<?` used to order something before emission gives a correct lc1 from the
-interpreter and identical but wrong lc2 and lc3.
+the compiler uses: a primitive, a special form or a dual. lc2 == lc3 only says
+that the disagreement does not feed back on itself. The fault can be on either
+side. For example, a miscompiled `<` used to order something before emission
+gives a correct lc1 from the interpreter and identical but wrong lc2 and lc3.
 
 **Localization is by differential testing.** A corpus of small Lisp-0 programs
-runs under both the interpreter and lc1 and their output is compared. The first
-diverging program points at the faulty operation. Then the first differing
-function in the lc1 and lc2 diff points at where it is used.
+runs under both the interpreter and lc1, and their output, their stderr and
+their exit status are compared. The first diverging program points at the
+faulty operation. Then the first differing function in the lc1 and lc2 diff
+points at where it is used.
 
 Emitted binaries must be **deterministic**: no timestamps, paths, addresses, or
 iteration orders that differ between the interpreter and the compiled runtime.
 The interpreter's heap addresses differ from the runtime's, so the compiler
 never hashes or orders anything by address, and never iterates the symbol table
-to decide emission order. Order always comes from source order or an explicit
-list.
+to decide emission order. Its own tables hash names by their contents. Order
+always comes from source order or an explicit list.
 
 The full chain, including stage 1 and the differential corpus, runs in CI on
 the reference platform, with both a 4 KB and a 64 KB page kernel, and with the
@@ -326,7 +461,8 @@ interpreter built by tcc as well as by gcc or clang.
 Committed before any code generation:
 
 - **Tagged values**, with fixnums at tag zero, so arithmetic is a bare machine
-  operation. Shared identically by the interpreter and the runtime.
+  operation. `nil` is an immediate word. Shared identically by the interpreter
+  and the runtime.
 - **A header word on every heap object**, carrying type and size. It is unused
   until the collector exists, which is exactly why it must be there from the
   start: a heap you can't walk is a heap no GC can work on.
@@ -366,6 +502,10 @@ With these in place, the first GC requires zero changes to the compiler:
 The runtime also records the stack base at `_start`, and the collector spills
 callee-saved registers before scanning. Both are runtime-only.
 
+The collector is a runtime-internal function, written in Lisp-0 with the
+compile-only primitives. It must not allocate while it runs, so the definition
+of Lisp-0 states which constructs are guaranteed not to allocate.
+
 ### Room reserved for later generations
 
 Parallelism, conditions and typing are objectives that generation zero does
@@ -377,8 +517,8 @@ change later:
   there is one allocator state for the whole process.
 - **Nothing assumes a single stack.** The stack base is a field of per-thread
   runtime state reached through a reserved register, not a global.
-- **Syntax for type annotations is reserved in the reader** (see
-  [Reserved syntax](#semantic-rules)).
+- **Syntax is reserved in the reader** (see
+  [Symbol alphabet](#semantic-rules)).
 
 Nothing else about those features is designed until their generation.
 
@@ -392,6 +532,10 @@ Nothing else about those features is designed until their generation.
   stay within a single function. A jump to a distant target (a shared error
   handler, the runtime) is an inverted conditional branch over an unconditional
   `b`.
+- **Lookup tables** (global slots, labels, constants) are open-addressing hash
+  tables built in Lisp-0 over bytevectors, keyed by the contents of names.
+- **The shape of generated code and the calling convention are decided at
+  step 4**, once the assembler exists.
 
 ## Milestones
 
@@ -399,16 +543,18 @@ Nothing else about those features is designed until their generation.
 
 Nothing else matters until lc1 == lc2.
 
-0. Finish the definition of Lisp-0: names, the reserved characters, and how
-   immutable pairs, strings and vectors are constructed. The interpreter
-   cannot start before this.
-1. C interpreter running Lisp-0, with a REPL. Builds with tcc.
-2. Assembler and ELF writer in Lisp-0. Validated by hand-emitting a trivial
-   print-and-exit program, and running it under QEMU's `virt` machine on
-   kernels with 4 KB and 64 KB pages.
+0. Finish the definition of Lisp-0: confirm each name, write the error table,
+   and state which constructs do not allocate. The interpreter cannot start
+   before this.
+1. C interpreter running Lisp-0 files. Builds with tcc.
+2. Prelude, assembler and ELF writer in Lisp-0. Validated by hand-emitting a
+   trivial print-and-exit program, and running it under QEMU's `virt` machine
+   on kernels with 4 KB and 64 KB pages.
 3. Front end: reader and closure conversion. A straight recursive walk.
-4. Code generator and runtime prelude. Produce lc1.
+4. Code generator and runtime. Produce lc1.
 5. Grind until the invariant holds.
+6. Write a throwaway mark-sweep collector in the runtime, to show that the
+   compile-only primitives are enough for one. Then freeze Lisp-0.
 
 ### Generation one — memory
 
@@ -416,24 +562,29 @@ Mark-sweep GC with conservative scanning of the machine stack. A runtime-only
 change, given the prerequisites in the
 [object model](#what-makes-the-first-gc-a-runtime-only-change).
 
-### Generation two — the language
+### Generation two — the two languages
 
-`eval` (a small interpreter written in this Lisp and compiled in), macros for
-users, a REPL over that eval, richer numerics, and the richer syntax:
-brackets, braces and other sugar, in the manner of Clojure. Then the standard
-library with persistent collections, written in the full language, and the
-language reference. All on the accepted-language axis, and all subject to the
-frozen-semantics rule.
+1. **The middle language.** The bootstrap compiler learns macros (with a small
+   evaluator written in Lisp-0 and compiled in), local mutation, rest
+   parameters and vectors. It then stops growing.
+2. **The second compiler**, written in the middle language. At first it
+   accepts the middle language and optimizes nothing.
+3. **The full language**, in the second compiler: `eval`, a REPL over it,
+   richer numerics, and the richer syntax: brackets, braces and other sugar,
+   in the manner of Clojure.
+4. **The standard library** with persistent collections, written in the full
+   language, and the language reference.
+
+All of it is subject to the frozen-semantics rule.
 
 ### Generation three — the larger features
 
-In this order:
+All in the second compiler, in this order:
 
 1. **Conditions and restarts.** First, because the library's error behaviour
    depends on them. In Lisp-0 an error still just exits, so this is additive.
 2. **Gradual typing.** Before the optimizer, which uses the types.
-3. **The optimizing compiler**, written in the full language. Performance
-   becomes an objective here.
+3. **Optimization.** Performance becomes an objective here.
 4. **True parallelism.** Last, because it forces the largest rework of the
    runtime and the collector. Conservative scanning of many stacks with a
    stop-the-world collector is the expected starting point, and the riskiest
@@ -481,6 +632,20 @@ pins whatever the stack might reference and moves the rest.
   runtime: Go's `==` compares strings by contents, map iteration order is
   randomized, and integers are 64-bit. Rebuilding a modern Go from source also
   means building a long series of older Go releases, starting from Go 1.4.
+- **Syscalls in the interpreter** — it would let the interpreter run the
+  runtime's Lisp-0 code, with no duals. But a raw syscall cannot be written in
+  portable C99: it needs libc's `syscall` or inline assembly, and syscall
+  numbers differ between architectures, so the interpreter would stop running
+  on any host.
+- **A REPL and error recovery in the interpreter** — convenient, but the
+  bootstrap only ever runs files.
+- **A collector or pre-resolved variables in the interpreter** — they would
+  let the bootstrap compiler grow further. Instead the bootstrap compiler
+  stops at the middle language.
+- **Marking the duals in the source**, with a special form or a rule that a
+  builtin wins over a definition of the same name — both need code in the
+  interpreter. Keeping the duals' bodies in the runtime, which the interpreter
+  never loads, needs none.
 - **Fexprs / quote-only, no special forms** — needs eval plus first-class
   environments, gives dynamic scoping by default, and the compiler must still
   recognize `if` syntactically to emit a branch. Wand's result makes
@@ -488,10 +653,16 @@ pins whatever the stack might reference and moves the rest.
 - **Thunk-based `if` as a plain function** — the compiler needs the
   special-form handler regardless, so it saves nothing where it matters, and it
   costs a closure per branch.
-- **Falsy empty collections** — see [Truthiness](#semantic-rules).
+- **Three distinct values `nil`, `false` and the empty list**, as in Clojure —
+  it keeps "absent" apart from "empty" and from "no". A single `nil` is one
+  kind of value fewer on both sides, and makes every test one comparison.
+- **Falsy empty strings and bytevectors** — it would turn every `if` from a
+  word comparison into a type and count check.
 - **Moving the compiler to the full language** after the fixed point — it would
   let the compiler use the language's own features, but rebuilding from source
   would then need a chain of older compilers, and lc1 == lc2 would be lost.
+- **A bootstrap compiler that accepts the full language** — it would grow with
+  every feature, and stage 1 with it.
 - **Fully static typing** — Lisp-0 would have to be typeable from the first
   day, so the type system would have to be designed before any code.
 - **Lazy evaluation** — breaks the no-GC bump allocator by allocating a thunk
