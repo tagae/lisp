@@ -1,9 +1,29 @@
 # Design
 
-A self-hosting Lisp whose compiler is written in itself and emits ARM64
-executables directly.
+A self-hosting functional Lisp whose compiler is written in itself and emits
+ARM64 executables directly.
 
-## Goal
+## Objectives
+
+**What it is.** A functional language of the Lisp family: immutable data by
+default, persistent data structures, composition over side effects. It draws
+on Clojure, Common Lisp and Go, uses its own names, and is source-compatible
+with none of them.
+
+**Why self-hosting.**
+
+- A compiler that compiles itself is the proof that the language is not a toy.
+- Bootstrapping stays simple: a small C compiler such as tcc is enough to
+  start the chain.
+- Every byte between source and executable is under the project's control and
+  can be understood.
+
+**Who it is for.** Other people as well as its author. Adoption is not a
+measure of success, and the language does not have to beat anything. What the
+project owes its users is a language reference, readable error messages and a
+one-command build from source. There is no stability promise before a 1.0.
+
+**Bootstrap goals.**
 
 - **Self-hosting** — the compiler compiles its own source.
 - **Toolchain-independent** — no C compiler, no assembler, no linker in the
@@ -13,6 +33,31 @@ executables directly.
 
 Everything is as simple and dumb as possible until the fixed point is reached.
 No optimization passes, no intermediate representation, no cleverness.
+
+**Language goals**, in the order they are built after the fixed point (see
+[Milestones](#milestones)):
+
+- garbage collection, macros and `eval`;
+- a standard library with persistent collections, written in the full
+  language. Since the compiler itself stays in Lisp-0, this library is the
+  proof that the full language is not a toy;
+- conditions and restarts, as in Common Lisp: handlers run at the point of the
+  error, without unwinding the stack, and can pick a restart;
+- gradual typing: annotations are optional, checked at compile time where
+  present, and untyped code stays valid;
+- an optimizing compiler, at which point the performance of generated code
+  becomes an objective;
+- true parallelism: lightweight threads and channels running on several cores;
+- simplicity and tooling in the spirit of Go: a small language, fast compiles,
+  a formatter and a test runner, single static binaries;
+- datoms and a Datomic-style database, as a library.
+
+**Non-goals.**
+
+- Source compatibility with Clojure, Scheme or Common Lisp.
+- macOS and Windows, which cannot be targeted without the vendor's toolchain.
+- Any target other than ARM64 Linux before the standard library exists.
+- Auditing the bootstrap below the C compiler. tcc is small enough.
 
 ## Target and host
 
@@ -69,15 +114,27 @@ change the meaning of a defined Lisp-0 program. This is why Lisp-0 leaves
 fixnum overflow undefined (see below): a later switch to bignum promotion
 must not change the meaning of the compiler's own code.
 
+**Two compilers.** The compiler written in Lisp-0 is the bootstrap compiler.
+It stays simple and frozen, and the byte-for-byte invariant applies to it
+alone. The optimizing compiler planned for later is a second program, written
+in the full language and compiled by the bootstrap compiler.
+
 ## Lisp-0
+
+Lisp-0 is a subset of the functional language, not a Scheme that the language
+later moves away from. Its rules on data, truthiness and syntax are therefore
+those of the full language, and are fixed before any code is written.
 
 Deliberately minimal:
 
 - Special forms: `quote`, `if`, `lambda`, `define`, `set!`, `begin`, plus
   `cond`, `let`, `and`, `or` and `quasiquote`, all hardcoded.
 - Data: pairs, interned symbols, fixnums, strings, vectors, bytevectors, the
-  empty list, and the booleans.
+  empty list, `nil`, and the booleans.
 - Enough file I/O to read source and write a binary.
+
+The names of the special forms and primitives are still open: the language
+uses its own names, and they are chosen before Lisp-0 is frozen.
 
 No macros in Lisp-0. This is deliberate: hardcoding roughly ten special forms
 in both implementations costs less than a macro expander, and it means the
@@ -90,7 +147,26 @@ later, for users of the language, not for the bootstrap.
 The interpreter and the compiled runtime must agree on all of these. Anything
 not defined here is an error, and the compiler source never does it.
 
-**Truthiness.** Only `#f` is false. `'()` is true and is distinct from `#f`.
+**Truthiness.** Only `nil` and `false` are falsy. Every other value is true,
+including the empty list and every other empty collection. `nil`, `false` and
+the empty list are three distinct values. Emptiness is tested explicitly.
+Making empty collections falsy was rejected: it merges "absent" with "empty",
+it turns every `if` from a word comparison into a type and count check, and it
+would force lazy sequences to be evaluated by `if`.
+
+**Immutable data.** Pairs, strings and vectors are immutable: they are fully
+built when created, and there is no `set-car!`, `vector-set!` or
+`string-set!`. Mutation exists only in two explicit places:
+
+- bytevectors, which are mutable buffers (the assembler writes into one and
+  patches fixups in it);
+- global variables, through `set!`.
+
+**Reserved syntax.** Lisp-0 uses parentheses only. The characters `[`, `]`,
+`{` and `}`, and the characters set aside for later sugar and for type
+annotations, are not allowed in Lisp-0 symbols, and the Lisp-0 reader rejects
+them. The full language can then give them a meaning without changing any
+Lisp-0 program. The exact set is fixed before Lisp-0 is frozen.
 
 **Definitions and assignment.**
 
@@ -118,12 +194,14 @@ any size: every iteration would use a stack frame, and both run on an 8 MB
 default stack.
 
 **Identity.** `eq?` is pointer identity for heap objects and value equality for
-fixnums, symbols, booleans and `'()`. The interpreter uses the runtime's tagged
+fixnums, symbols, booleans, `nil` and `'()`. The interpreter uses the runtime's tagged
 words as its values, so on both sides `eq?` is a comparison of two words.
 
-**Quoted constants are immutable.** Mutating a quoted constant is an error.
-Compiled constants live in the image and interpreter constants on its heap, so
-mutating one could not behave the same on both sides.
+**Quoted constants are immutable.** This follows from immutable data for
+pairs, strings and vectors. It also covers bytevectors: mutating a quoted
+bytevector is an error. Compiled constants live in the image and interpreter
+constants on its heap, so mutating one could not behave the same on both
+sides.
 
 **Fixnum arithmetic.**
 
@@ -159,9 +237,14 @@ mutating one could not behave the same on both sides.
 
 Strict C99, using only the standard library (`stdio.h`, `stdlib.h`,
 `string.h`, `stdint.h`, `setjmp.h`). No compiler extensions and no reliance on
-compiler flags, so any C99 compiler builds it, including small ones such as
-tcc. Estimated at 1,500–2,500 lines, with its own reader. It runs once to
-produce stage 1 and is then kept forever, but never required.
+compiler flags, so any C99 compiler builds it. Estimated at 1,500–2,500
+lines, with its own reader. It runs once to produce stage 1 and is then kept
+forever, but never required.
+
+**Building with tcc is a requirement, checked in CI.** The interpreter is
+built with tcc and with gcc or clang, and the lc1 each build produces must be
+byte-identical. This turns "any C99 compiler" into a tested claim, and keeps
+the bootstrap within reach of a compiler far smaller than gcc.
 
 It is a **semantic specification**, not a throwaway: any divergence from the
 compiled runtime becomes a compiler that works under the interpreter and
@@ -237,7 +320,8 @@ to decide emission order. Order always comes from source order or an explicit
 list.
 
 The full chain, including stage 1 and the differential corpus, runs in CI on
-the reference platform, with both a 4 KB and a 64 KB page kernel.
+the reference platform, with both a 4 KB and a 64 KB page kernel, and with the
+interpreter built by tcc as well as by gcc or clang.
 
 ## Object model
 
@@ -284,6 +368,22 @@ With these in place, the first GC requires zero changes to the compiler:
 The runtime also records the stack base at `_start`, and the collector spills
 callee-saved registers before scanning. Both are runtime-only.
 
+### Room reserved for later generations
+
+Parallelism, conditions and typing are objectives that generation zero does
+not implement. It reserves only what is nearly free now and expensive to
+change later:
+
+- **The allocation pointer and limit live in registers reserved for the
+  current thread**, not in global variables. Emitted code never assumes that
+  there is one allocator state for the whole process.
+- **Nothing assumes a single stack.** The stack base is a field of per-thread
+  runtime state reached through a reserved register, not a global.
+- **Syntax for type annotations is reserved in the reader** (see
+  [Reserved syntax](#semantic-rules)).
+
+Nothing else about those features is designed until their generation.
+
 ## Code generation notes
 
 - ARM64 instructions are uniform 4-byte bitfield encodings, so the assembler is
@@ -301,13 +401,24 @@ callee-saved registers before scanning. Both are runtime-only.
 
 Nothing else matters until lc1 == lc2.
 
-1. C interpreter running Lisp-0, with a REPL.
+0. Finish the definition of Lisp-0: names, the reserved characters, and how
+   immutable pairs, strings and vectors are constructed. The interpreter
+   cannot start before this.
+1. C interpreter running Lisp-0, with a REPL. Builds with tcc.
 2. Assembler and ELF writer in Lisp-0. Validated by hand-emitting a trivial
    print-and-exit program, and running it under QEMU's `virt` machine on
    kernels with 4 KB and 64 KB pages.
 3. Front end: reader and closure conversion. A straight recursive walk.
 4. Code generator and runtime prelude. Produce lc1.
 5. Grind until the invariant holds. This is expected to be most of the project.
+
+**Checkpoint after step 2.** The project is open-ended, with one gate: once
+the interpreter, the assembler and the hand-emitted program work on both page
+sizes and build with tcc, review the effort spent and the definition of Lisp-0
+before starting the code generator.
+
+**The fixed point is the first public release.** It is announced when
+lc1 == lc2 holds in CI. Everything after it is built in public.
 
 ### Generation one — memory
 
@@ -318,20 +429,38 @@ change, given the prerequisites in the
 ### Generation two — the language
 
 `eval` (a small interpreter written in this Lisp and compiled in), macros for
-users, a REPL over that eval, richer numerics, error handling, and a real
-library. All on the accepted-language axis, and all subject to the
+users, a REPL over that eval, richer numerics, and the richer syntax:
+brackets, braces and other sugar, in the manner of Clojure. Then the standard
+library with persistent collections, written in the full language, and the
+language reference. All on the accepted-language axis, and all subject to the
 frozen-semantics rule.
 
-### Generation three — reach
+### Generation three — the larger features
+
+In this order:
+
+1. **Conditions and restarts.** First, because the library's error behaviour
+   depends on them. In Lisp-0 an error still just exits, so this is additive.
+2. **Gradual typing.** Before the optimizer, which uses the types.
+3. **The optimizing compiler**, written in the full language. Performance
+   becomes an objective here.
+4. **True parallelism.** Last, because it forces the largest rework of the
+   runtime and the collector. Conservative scanning of many stacks with a
+   stop-the-world collector is the expected starting point, and the riskiest
+   part of the plan.
+
+### Generation four — reach
 
 - A second backend (RISC-V under user-mode emulation), as the best available
   correctness audit, since it forces the front end and the machine model apart.
 - Separate compilation.
+- Tooling: a formatter and a test runner.
+- Datoms and a Datomic-style database, as a library.
 - Possibly a JIT for macro expansion as an optimization, keeping the
   interpreted expander as the cross-compilation path.
 - Possibly precise GC with compiler-emitted stack maps.
 
-## FFI strategy (generation three)
+## FFI strategy (generation four)
 
 Syscalls are not FFI and need no machinery. Do those first and see how far they
 get.
@@ -369,25 +498,13 @@ pins whatever the stack might reference and moves the rest.
 - **Thunk-based `if` as a plain function** — the compiler needs the
   special-form handler regardless, so it saves nothing where it matters, and it
   costs a closure per branch.
+- **Falsy empty collections** — see [Truthiness](#semantic-rules).
+- **Moving the compiler to the full language** after the fixed point — it would
+  let the compiler use the language's own features, but rebuilding from source
+  would then need a chain of older compilers, and lc1 == lc2 would be lost.
+- **Fully static typing** — Lisp-0 would have to be typeable from the first
+  day, so the type system would have to be designed before any code.
 - **Lazy evaluation** — breaks the no-GC bump allocator by allocating a thunk
   per argument, and unsequenced effects are fatal for a code generator that
   appends bytes in order. Laziness belongs in the target language as
   `delay`/`force`.
-
-## Planned as next steps
-
-- The language is cast to belong to the Lisp family, drawing inspiration from Common Lisp and
-  Scheme, but it is not meant to be compatible, and can depart from those. Much in the way Clojure
-  was designed.
-
-- Have a richer syntax, along the lines of Clojure, by making it possible to
-  use not only parentheses, but also curly braces, brackets, and probably other
-  syntactic sugar, while staying within the realm of a Lisp family language.
-
-- Language design should be geared towards functional programming, meaning
-  that we prefer immutability, composition, and avoid side effects.
-
-- We will aim at having persistent data structures, in the Clojure sense, rather than having
-  anything to do with databases).
-
-- We will aim at having datoms and datomic databases, like Clojure.
