@@ -18,10 +18,8 @@ with none of them.
 - Every byte between source and executable is under the project's control and
   can be understood.
 
-**Who it is for.** Other people as well as its author. Adoption is not a
-measure of success, and the language does not have to beat anything. What the
-project owes its users is a language reference, readable error messages and a
-one-command build from source. There is no stability promise before a 1.0.
+**What comes with it.** A language reference, readable error messages and a
+one-command build from source.
 
 **Bootstrap goals.**
 
@@ -410,15 +408,7 @@ Nothing else matters until lc1 == lc2.
    kernels with 4 KB and 64 KB pages.
 3. Front end: reader and closure conversion. A straight recursive walk.
 4. Code generator and runtime prelude. Produce lc1.
-5. Grind until the invariant holds. This is expected to be most of the project.
-
-**Checkpoint after step 2.** The project is open-ended, with one gate: once
-the interpreter, the assembler and the hand-emitted program work on both page
-sizes and build with tcc, review the effort spent and the definition of Lisp-0
-before starting the code generator.
-
-**The fixed point is the first public release.** It is announced when
-lc1 == lc2 holds in CI. Everything after it is built in public.
+5. Grind until the invariant holds.
 
 ### Generation one — memory
 
