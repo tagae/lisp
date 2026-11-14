@@ -1,0 +1,47 @@
+name: CI
+
+# A push that changes nothing but documentation builds nothing.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.claude/**'
+      - LICENSE
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+# The checks run in two ways, as on a developer's machine: on an arm64 Linux host, and in the dev
+# container.
+jobs:
+  test:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install tcc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tcc
+      - name: Test
+        run: make test
+
+  docker-test:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Test
+        run: make docker-test

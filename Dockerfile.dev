@@ -1,0 +1,30 @@
+FROM debian:stable-slim
+
+# Provision dev tools: both C compilers that build the interpreter, and QEMU, the reference
+# platform (the system emulator) and the cheap way to run arm64 binaries elsewhere (user mode).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    tcc \
+    qemu-system-arm \
+    qemu-user \
+    ca-certificates \
+    git \
+    sudo
+
+ENV LANG=C
+ENV LC_ALL=C
+
+# Provision user.
+ARG HOST_UID
+ARG HOST_GID
+RUN groupdel dialout # Conflicts with macOS.
+RUN groupadd --gid $HOST_GID dev
+# The home is not /mnt/lisp, the checkout: what a shell or a tool keeps there (.bash_history) would
+# land in it.
+RUN useradd --uid $HOST_UID --no-user-group --groups dev --create-home dev
+RUN printf '%s\n' 'dev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev && chmod 0440 /etc/sudoers.d/dev
+
+RUN mkdir -pv /mnt/lisp && chown dev:dev /mnt/lisp
+
+USER dev
+WORKDIR /mnt/lisp

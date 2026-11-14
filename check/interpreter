@@ -1,0 +1,29 @@
+#!/bin/sh
+
+# Checks every build of the interpreter that it is given, one per C compiler.
+#
+# For now the interpreter is a stub, so the only check is that each build runs and reports that it
+# is one. The checks of Lisp-0 itself, and the comparison of the lc1 that each build produces, come
+# here.
+#
+# Usage, from the repository root: check/interpreter build/<compiler>/interpreter... (`make test`)
+
+set -o errexit -o nounset
+
+[ $# -gt 0 ] || {
+    echo "Usage: $0 build/<compiler>/interpreter..." >&2
+    exit 2
+}
+
+failed=
+
+for interpreter; do
+    status=0
+    output=$($interpreter 2>&1) || status=$?
+    if [ $status -ne 2 ] || [ "$output" != 'interpreter: not implemented' ]; then
+        echo "$interpreter: exit status $status: $output"
+        failed=yes
+    fi
+done
+
+[ -z "$failed" ]

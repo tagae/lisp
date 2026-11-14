@@ -1,0 +1,16 @@
+services:
+  dev:
+    build:
+      dockerfile: Dockerfile.dev
+      args:
+        HOST_UID:
+        HOST_GID:
+    # The target is arm64 Linux. On an arm64 host (Apple silicon) the container is native, so the
+    # stages run directly. On any other host Docker emulates it.
+    platform: linux/arm64
+    tty: true
+    stdin_open: true
+    volumes:
+      - type: bind
+        source: .
+        target: /mnt/lisp

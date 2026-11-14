@@ -1,0 +1,3 @@
+# The build context holds what Dockerfile.dev copies, which is nothing: the project is mounted into
+# the container (docker-compose.yaml), not copied.
+*

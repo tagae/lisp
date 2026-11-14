@@ -1,0 +1,6 @@
+# Only the guidelines and the skills are tracked. The rest is the state of the tools that run in
+# this directory (credentials, history, sessions, settings).
+/*
+!/CLAUDE.md
+!/.gitignore
+!/skills/
