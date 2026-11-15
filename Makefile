@@ -40,12 +40,7 @@ clean:
 	@echo HOST_UID=$$(id -u) >> $@
 	@echo HOST_GID=$$(id -g) >> $@
 
-# The same rules in the dev container, which is arm64 Linux whatever the host is.
-docker-interpreter docker-test: docker-%: .env
-	docker compose run --build --rm dev make $*
-
-# A shell in the dev container.
-docker-shell: .env
+docker-dev: .env
 	docker compose run --build --rm dev bash
 
 docker-clean: clean

@@ -13,8 +13,7 @@ Layout
 * `check/`: the checks that `make test` runs
 * `build/`: what is built, per C compiler (e.g., `build/tcc/interpreter`)
 * `Makefile`: build rules
-* `Dockerfile.dev`, `docker-compose.yaml`: the dev container, which is arm64 Linux whatever the host
-  is
+* `Dockerfile.dev`, `docker-compose.yaml`: dev container
 
 
 Building
