@@ -1,6 +1,6 @@
-A self-hosting functional Lisp whose compiler is written in itself and emits ARM64 Linux executables
-directly. See [DESIGN.md](DESIGN.md) for the objectives and the design, and [NAMING.md](NAMING.md)
-for the choice of a name.
+A self-hosting functional Lisp whose compiler is written in itself and emits ARM64 Linux and macOS
+executables directly. See [DESIGN.md](DESIGN.md) for the objectives and the design, and
+[NAMING.md](NAMING.md) for the choice of a name.
 
 Nothing runs yet: the interpreter and the compiler are stubs.
 
@@ -19,16 +19,17 @@ Layout
 Building
 --------
 
-On arm64 Linux, with `make`, `gcc` and `tcc`:
+On arm64 Linux or arm64 macOS, with `make`, `gcc` and `tcc`:
 
 ```shell
 make test
 ```
 
 This builds the interpreter with every C compiler in `COMPILERS` (`gcc tcc` by default) and checks
-each build.
+each build. On macOS, `gcc` is Apple's clang and `tcc` is not installed by default, so
+`make test COMPILERS=gcc` builds without it.
 
-Anywhere else (macOS, for one), the same runs in the dev container, through Docker Compose:
+On any other host, the same runs in the dev container, through Docker Compose:
 
 ```shell
 make docker-test

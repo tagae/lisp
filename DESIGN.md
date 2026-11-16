@@ -27,11 +27,14 @@ one-command build from source.
 - **Toolchain-independent** — no C compiler, no assembler, no linker in the
   build: each stage compiles the next with nothing else. The only external
   dependency is a C compiler, to build the interpreter that starts the chain,
-  plus the kernel.
+  plus the kernel (on macOS, possibly also libSystem: see [macOS](#macos)).
 - **A minimal C interpreter** — the interpreter is the only part of the
   project that is not written in the language itself, so it is kept as small
   as possible. Whatever can be written in Lisp-0 is, and Lisp-0 has nothing
   the compiler can do without (see [The C interpreter](#the-c-interpreter)).
+- **Native on macOS** — the compiler emits arm64 macOS executables as well as
+  arm64 Linux ones, so that the whole chain runs on an Apple-silicon laptop
+  with no container and no emulator (see [Target and host](#target-and-host)).
 
 **The bootstrap comes first.** When a language feature conflicts with the
 bootstrap, the feature gives way: it is simplified, moved to the second
@@ -61,14 +64,22 @@ No optimization passes, no intermediate representation, no cleverness.
 **Non-goals.**
 
 - Source compatibility with Clojure, Scheme or Common Lisp.
-- macOS and Windows, which cannot be targeted without the vendor's toolchain.
-- Any target other than ARM64 Linux before the standard library exists.
+- Windows, which cannot be targeted without the vendor's toolchain.
+- Any target other than ARM64 Linux and ARM64 macOS before the standard
+  library exists.
 - Auditing the bootstrap below the C compiler. tcc is small enough.
 
 ## Target and host
 
-The target is Linux on a generic 64-bit ARM machine: plain ARMv8-A, ignoring
-optional extensions. Output is a static ELF written directly by the compiler —
+The targets are Linux and macOS, both on 64-bit ARM, both from generation
+zero. Linux is the reference. macOS is there so that the whole chain, checks
+included, runs natively on an Apple-silicon laptop. The two share the front
+end, the code generator and the prelude. They differ in the file format, in the
+system interface and in the lowest layer of the runtime (see [macOS](#macos)).
+
+On **Linux** the target is a generic 64-bit ARM machine: plain ARMv8-A,
+ignoring optional extensions. Output is a static ELF written directly by the
+compiler —
 no object files, no relocations, no `PT_INTERP`, no libc. Everything the
 runtime needs comes from raw syscalls. The arm64 Linux syscall ABI is the same
 on every machine, so nothing in the output is specific to a board.
@@ -81,11 +92,52 @@ by accident would still pass. Whatever runs there should run on any arm64
 Linux machine: boards, cloud instances, CI runners.
 
 **The host can be anything.** The interpreter is portable C, so stage 1 can be
-produced on any machine. Running lc1 and the later stages needs arm64 Linux,
-native or emulated. `qemu-aarch64` user-mode emulation runs the static
-binaries directly on a non-ARM host and is a cheap way to run the chain, but
-it is not the reference: it uses the host's page size and implements the
-syscalls itself.
+produced on any machine, for either target. Running lc1 and the later stages
+needs the target's own system: arm64 Linux, native or emulated, or arm64
+macOS. `qemu-aarch64` user-mode emulation runs the static Linux binaries
+directly on a non-ARM host and is a cheap way to run the chain, but it is not
+the reference: it uses the host's page size and implements the syscalls
+itself.
+
+### macOS
+
+The macOS target is arm64 Mach-O, for Apple silicon. Intel Macs are not a
+target. As with the ELF, the compiler writes the file directly: no object
+files, no linker. A compiler run names its target on the command line, since
+Lisp-0 has no way to ask which system it runs on. Three things differ from
+Linux, and only the writer, the runtime and the emitted `syscall` sequence see
+them:
+
+- **The file.** A Mach-O executable replaces the ELF. Its segments are aligned
+  to 16 KB. The kernel is likely to refuse a segment that is both writable and
+  executable, so code and data go in separate segments, unlike the single RWX
+  segment of the ELF.
+- **The signature.** arm64 macOS runs only signed code. An ad-hoc signature,
+  which is a hash of every page and needs no certificate, is enough. Apple's
+  tools add it, and to stay free of them the compiler writes it itself. That
+  puts a SHA-256 in the prelude, which stage 1 runs under an interpreter that
+  never frees memory: its time and memory count against stage 1. The fallback
+  is a `codesign -s -` step in the macOS build, which gives up toolchain
+  independence there.
+- **The system interface.** Apple supports libSystem, not the syscall
+  interface. A raw syscall also follows another convention from Linux's: the
+  number in `x16`, `svc #0x80` to trap, and an error flagged in the carry bit.
+  `syscall` keeps the meaning that Lisp-0 gives it, and the code generator
+  emits the sequence for the target, returning `-errno` as on Linux. The
+  numbers differ, so the runtime's layer over the system (the bodies of the
+  duals, start-up, the heap reservation) is one per target.
+
+The first choice is raw syscalls on macOS too, because it leaves the no-libc
+rule, the primitives and the structure of the runtime as they are. It relies
+on an interface that Apple does not promise to keep.
+
+**Open until step 2 of [Milestones](#milestones).** Hand-emit a print-and-exit
+Mach-O and run it on the Mac, to find out whether a Mach-O with no dyld and no
+libSystem runs on current macOS, whether it needs separate segments, and what
+an acceptable ad-hoc signature contains. If raw syscalls fail, the writer gains
+the dynamic-linking load commands and imports from libSystem the few functions
+that the duals need. The toolchain-independent goal then reads "plus the kernel
+and libSystem" on macOS.
 
 ### Page size
 
@@ -100,6 +152,11 @@ all three:
   and `p_align = 64 KB`, which covers 4, 16 and 64 KB kernels.
 - The runtime never hardcodes 4096. Mapping sizes and addresses are rounded to
   64 KB, or to the page size read from the auxiliary vector (`AT_PAGESZ`).
+
+macOS on Apple silicon uses 16 KB pages, the size that the 4 KB and 64 KB
+kernels of the reference platform leave untested: running natively on a Mac
+covers it. Rounding to 64 KB suits macOS, which has no auxiliary vector to read
+the page size from.
 
 ## The governing principle: two independent axes
 
@@ -211,16 +268,30 @@ Mutation exists only in two explicit places:
 Indexing gives a fixnum. Lisp-0 source is ASCII: both readers reject any byte
 above 127, so the full language is free to decide what a character is.
 
-**Symbol alphabet and reserved syntax.** A Lisp-0 symbol contains only
-letters, digits and `- ? ! * + / < > = .`, and does not look like an integer.
-Besides these, the reader accepts `(`, `)`, `'`, `"` and `;`. Every other
-ASCII punctuation character is rejected outside strings and comments. That
-reserves `[ ] { } : # @ ^ ~ & % $ | \ _`, the backquote and the comma, so the
-later languages can give them a meaning without changing any Lisp-0 program.
+**Source text.** Anywhere in a source file, comments and strings included, a
+byte is printable ASCII (32–126), a tab, a line feed or a carriage return. Any
+other byte is an error. That rules out the other control characters, NUL and
+DEL, which could otherwise hide in a string or a comment. The blanks are the
+space, the tab, the line feed and the carriage return. A comment runs from `;`
+to the next line feed, so a carriage return alone does not end it. A string
+holds any such byte, a raw line feed or tab included, except `"` and `\`,
+which are written as escapes. A string with another byte in 0–127 is built
+from a bytevector with `bytes->string`.
 
-**Literals.** Integers are written in decimal or, with `0x`, in hexadecimal.
-A literal that does not fit a fixnum is an error. In a string, `\n`, `\\` and
-`\"` are the only escapes.
+**Symbol alphabet and reserved syntax.** A Lisp-0 symbol contains only
+letters, digits and `- ? ! * + / < > = .`, and does not start like an integer
+(see Literals). Besides these, the reader accepts `(`, `)`, `'`, `"` and `;`.
+These and the blanks end a symbol, so `a'b` reads as the symbol `a`, a quote
+and the symbol `b`. Every other ASCII punctuation character is rejected
+outside strings and comments. That reserves `[ ] { } : # @ ^ ~ & % $ | \ _`,
+the backquote and the comma, so the later languages can give them a meaning
+without changing any Lisp-0 program.
+
+**Literals.** An integer is an optional sign, `+` or `-`, and then decimal
+digits or, after `0x` in lower case, hexadecimal digits in either case. A word
+that starts like an integer, with an optional sign and then a digit, must be
+one: `1+` and `1.5` are errors, not symbols. A literal that does not fit a
+fixnum is an error. In a string, `\n`, `\\` and `\"` are the only escapes.
 
 **Definitions and assignment.**
 
@@ -452,9 +523,15 @@ never hashes or orders anything by address, and never iterates the symbol table
 to decide emission order. Its own tables hash names by their contents. Order
 always comes from source order or an explicit list.
 
+**The chain runs once per target.** Each target has its own lc1, lc2 and lc3,
+and the invariant `lc1 == lc2` holds for each. The interpreter produces the
+same bytes for a target on every host, so the macOS lc1 that a Linux host
+builds is the one that the Mac builds.
+
 The full chain, including stage 1 and the differential corpus, runs in CI on
 the reference platform, with both a 4 KB and a 64 KB page kernel, and with the
-interpreter built by tcc as well as by gcc or clang.
+interpreter built by tcc as well as by gcc or clang. The macOS chain runs on an
+arm64 macOS runner.
 
 ## Object model
 
@@ -547,12 +624,14 @@ Nothing else matters until lc1 == lc2.
    and state which constructs do not allocate. The interpreter cannot start
    before this.
 1. C interpreter running Lisp-0 files. Builds with tcc.
-2. Prelude, assembler and ELF writer in Lisp-0. Validated by hand-emitting a
-   trivial print-and-exit program, and running it under QEMU's `virt` machine
-   on kernels with 4 KB and 64 KB pages.
+2. Prelude, assembler, and ELF and Mach-O writers in Lisp-0. Validated by
+   hand-emitting a trivial print-and-exit program for each: the ELF runs under
+   QEMU's `virt` machine on kernels with 4 KB and 64 KB pages, and the Mach-O
+   natively on macOS, which settles the open points of [macOS](#macos).
 3. Front end: reader and closure conversion. A straight recursive walk.
-4. Code generator and runtime. Produce lc1.
-5. Grind until the invariant holds.
+4. Code generator and runtime, with a layer per operating system. Produce lc1
+   for each target.
+5. Grind until the invariant holds for each target.
 6. Write a throwaway mark-sweep collector in the runtime, to show that the
    compile-only primitives are enough for one. Then freeze Lisp-0.
 
