@@ -1,4 +1,4 @@
-; The compiler, written in Lisp-0 (see DESIGN.md): reader, closure conversion, code generator,
-; assembler and ELF writer.
+; The compiler, written in Lisp-0: reader, closure conversion, code generator, assembler, and ELF
+; and Mach-O writers.
 ;
-; Empty for now: Lisp-0 has to be defined first (generation zero, step 0).
+; Empty for now: the definition of Lisp-0 has to be finished first (its names, its table of errors).
